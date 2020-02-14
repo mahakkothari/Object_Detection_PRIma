@@ -170,13 +170,111 @@ The n_classes filters for a prior calculate a set of n_classes scores for that p
 
 All our filters are applied with a kernel size of 3, 3.
 
+## Data Pipeline
+**Parse raw data**
+* xml_parser() function in main.ipynb is used to process the data in xml format.
+* convex hull annotations are converted to bounding box.
+* labels given in the form of strings in converted into int by assigning each label an int value
 
+**PyTorch Dataset**
 
+See PascalVOCDataset in main.ipynb
 
+This is a subclass of PyTorch Dataset, used to define our training and test datasets. It needs a __len__ method defined, which returns the size of the dataset, and a __getitem__ method which returns the ith image, bounding boxes of the objects in this image, and labels for the objects in this image.
 
-  
-  
-  
-  
+**Data Transforms**
 
+See transform() in utils.py.
+
+This function applies the following transformations to the images and the objects in them –
+
+* Randomly adjust brightness, contrast, saturation, and hue, each with a 50% chance and in random order.
+
+* With a 50% chance, perform a zoom out operation on the image. This helps with learning to detect small objects. The zoomed out image must be between 1 and 4 times as large as the original. The surrounding space could be filled with the mean of the ImageNet data.
+
+* Randomly crop image, i.e. perform a zoom in operation. This helps with learning to detect large or partial objects. Some objects may even be cut out entirely. Crop dimensions are to be between 0.3 and 1 times the original dimensions. The aspect ratio is to be between 0.5 and 2. Each crop is made such that there is at least one bounding box remaining that has a Jaccard overlap of either 0, 0.1, 0.3, 0.5, 0.7, or 0.9, randomly chosen, with the cropped image. In addition, any bounding boxes remaining whose centers are no longer in the image as a result of the crop are discarded. There is also a chance that the image is not cropped at all.
+
+* With a 50% chance, horizontally flip the image.
+
+* Resize the image to 300, 300 pixels. This is a requirement of the SSD300.
+
+* Convert all boxes from absolute to fractional boundary coordinates. At all stages in our model, all boundary and center-size coordinates will be in their fractional forms.
+
+* Normalize the image with the mean and standard deviation of the ImageNet data that was used to pretrain our VGG base.
+
+**PyTorch DataLoader**
+
+The Dataset described above, PascalVOCDataset, will be used by a PyTorch DataLoader in main.ipynb to create and feed batches of data to the model for training or validation.
+
+Since the number of objects vary across different images, their bounding boxes, labels, and difficulties cannot simply be stacked together in the batch. There would be no way of knowing which objects belong to which image.
+
+Instead, we need to pass a collating function to the collate_fn argument, which instructs the DataLoader about how it should combine these varying size tensors. The simplest option would be to use Python lists.
+
+**Base Convolutions**
+
+See VGGBase in model.py.
+
+Here, we create and apply base convolutions.
+
+The layers are initialized with parameters from a pretrained VGG-16 with the load_pretrained_layers() method.
+
+We're especially interested in the lower-level feature maps that result from conv4_3 and conv7, which we return for use in subsequent stages.
+
+**Auxiliary Convolutions**
+
+See AuxiliaryConvolutions in model.py.
+
+Here, we create and apply auxiliary convolutions.
+
+Use a uniform Xavier initialization for the parameters of these layers.
+
+We're especially interested in the higher-level feature maps that result from conv8_2, conv9_2, conv10_2 and conv11_2, which we return for use in subsequent stages.
+
+**Prediction Convolutions**
+
+See PredictionConvolutions in model.py.
+
+Here, we create and apply localization and class prediction convolutions to the feature maps from conv4_3, conv7, conv8_2, conv9_2, conv10_2 and conv11_2.
+
+These layers are initialized in a manner similar to the auxiliary convolutions.
+
+We also reshape the resulting prediction maps and stack them as discussed. Note that reshaping in PyTorch is only possible if the original tensor is stored in a contiguous chunk of memory.
+
+As expected, the stacked localization and class predictions will be of dimensions 8732, 4 and 8732, 21 respectively.
+
+**Putting it all together**
+
+See SSD300 in model.py.
+
+Here, the base, auxiliary, and prediction convolutions are combined to form the SSD.
+
+There is a small detail here – the lowest level features, i.e. those from conv4_3, are expected to be on a significantly different numerical scale compared to its higher-level counterparts. Therefore, the authors recommend L2-normalizing and then rescaling each of its channels by a learnable value.
+
+**Priors**
+
+See create_prior_boxes() under SSD300 in model.py.
+
+This function creates the priors in center-size coordinates as defined for the feature maps from conv4_3, conv7, conv8_2, conv9_2, conv10_2 and conv11_2, in that order. Furthermore, for each feature map, we create the priors at each tile by traversing it row-wise.
+
+This ordering of the 8732 priors thus obtained is very important because it needs to match the order of the stacked predictions.
+
+**Multibox Loss**
+
+See MultiBoxLoss in model.py.
+
+Two empty tensors are created to store localization and class prediction targets, i.e. ground truths, for the 8732 predicted boxes in each image.
+
+We find the ground truth object with the maximum Jaccard overlap for each prior, which is stored in object_for_each_prior.
+
+We want to avoid the rare situation where not all of the ground truth objects have been matched. Therefore, we also find the prior with the maximum overlap for each ground truth object, stored in prior_for_each_object. We explicitly add these matches to object_for_each_prior and artificially set their overlaps to a value above the threshold so they are not eliminated.
+
+Based on the matches in object_for_each prior, we set the corresponding labels, i.e. targets for class prediction, to each of the 8732 priors. For those priors that don't overlap significantly with their matched objects, the label is set to background.
+
+Also, we encode the coordinates of the 8732 matched objects in object_for_each prior in offset form (g_c_x, g_c_y, g_w, g_h) with respect to these priors, to form the targets for localization. Not all of these 8732 localization targets are meaningful. As we discussed earlier, only the predictions arising from the non-background priors will be regressed to their targets.
+
+The localization loss is the Smooth L1 loss over the positive matches.
+
+Perform Hard Negative Mining – rank class predictions matched to background, i.e. negative matches, by their individual Cross Entropy losses. The confidence loss is the Cross Entropy loss over the positive matches and the hardest negative matches. Nevertheless, it is averaged only by the number of positive matches.
+
+The Multibox Loss is the aggregate of these two losses, combined in the ratio α. In our case, they are simply being added because α = 1.
 
