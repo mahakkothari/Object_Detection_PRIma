@@ -278,3 +278,8 @@ Perform Hard Negative Mining – rank class predictions matched to background, i
 
 The Multibox Loss is the aggregate of these two losses, combined in the ratio α. In our case, they are simply being added because α = 1.
 
+![Graph](/images/graph.png)
+
+**Training_Loss**   (min:    1.838, max:   22.214)
+
+**Validation_Loss** (min:    1.850, max:   14.141)
